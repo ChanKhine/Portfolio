@@ -1,0 +1,160 @@
+---
+title: "Lucky_Tiger_Movies_Final_R"
+author: "Chan Khine"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library, include=FALSE}
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(tidyverse) 
+library(tidymodels)
+library(ggplot2) 
+library(Rserve)
+library(mvoutlier)
+library(car)
+library(lmtest)
+library(sandwich)
+library(forecast)
+library(leaps)
+library(ggplot2)
+library(modelr)
+```
+
+
+1) X
+2) bo_year_rank
+3) worldwidegross
+4) domesticgross
+5) overseasgross
+6) runtimeMinutes
+7) averageRating
+8) numVotes
+9) Hcluster
+10) km.cluster
+11) numVotes_sq
+12) bo_and_num
+
+Target Variable - worldwide gross 
+Explanatory variables - runtimeMinutes, averageRating, numVotes, Hcluster,
+km.cluster, numVotes_sq, bo_and_num
+
+```{r data}
+df <- read.csv('/Users/mac/Desktop/4 DATA/Report/Final Project/clusterdata.csv')
+summary(df)
+str(df)
+```
+```{r preparation cluster}
+df$numVotes_sq <- df$numVotes^2
+df$bo_and_num <- df$bo_year_rank * df$numVotes
+df$km.cluster <- as.character(df$km.cluster)
+df$Hcluster <- as.character(df$Hcluster)
+str(df)
+```
+
+```{r exclude outliers}
+#exclude the outliars use 1.5 iqr
+#q1 <- quantile(df$worldwidegross,0.25)
+#q3 <- quantile(df$worldwidegross,0.75)
+#iqr<- IQR(df$worldwidegross)
+#movie.clean<-subset(df, df$worldwidegross  > (q1-1.5*iqr) & df$worldwidegross  < (q3 +1.5*iqr))
+df2 <- filter(df, worldwidegross < 463000000, runtimeMinutes<190,numVotes<450000,
+              averageRating>2, bo_and_num<26000000, numVotes_sq<130000000000)
+```
+
+```{r save new file}
+#write.csv(df2, file = '/Users/mac/Desktop/4 DATA/Report/Final Project/cluster2.csv')
+```
+
+```{r preparation}
+movie.t <- as_tibble(df2) 
+# select variables for regression
+selected.varC <- c(3,6,7,8,9,10,11,12) 
+selected.var <- c(3,6,7,8,11,12) 
+# partition data
+set.seed(3)  # set seed for reproducing the partition
+train.index <- sample(c(1:dim(movie.t)[1]), dim(movie.t)[1]*0.6) 
+#Create and set aside the remaining 40% of the data, to be used after omitting unhelpful data points and unnecessary variables.
+train.tC <- movie.t[ train.index, selected.varC ]
+valid.tC <- movie.t[ -train.index, selected.varC ]
+train.t <- movie.t[ train.index, selected.var ]
+valid.t <- movie.t[ -train.index, selected.var ]
+```
+
+## Linear Regression
+
+```{r no cluster}
+options(scipen=999)
+movie.lm <- lm(worldwidegross ~ ., data = train.t)
+summary(movie.lm)
+
+#check for Variance Inflation Factor (VIF); must be < 10; should be less than 5
+vif(movie.lm)
+# VIF for all variables is less than 5
+
+par(mfrow=c(2,2))
+plot(movie.lm)
+
+hist(movie.lm$residuals/100000000,
+     main="Histogram of Residuals",
+     xlab="Residuals") 
+```
+```{r predict no cluster}
+
+summary(valid.t$worldwidegross)
+
+# use predict() to make predictions on a new set. 
+lm.pred <- predict(movie.lm, valid.t)
+options(scipen=999, digits = 0)
+some.residuals <- valid.t$worldwidegross[1:20] - lm.pred[1:20]
+data.frame("Predicted" = lm.pred[1:20], "Actual" = valid.t$worldwidegross[1:20],
+           "Residual" = some.residuals)
+accuracy(lm.pred, valid.t$worldwidegross)
+
+all.residuals <- valid.t$worldwidegross - lm.pred
+length(all.residuals[which(all.residuals > -1406 & all.residuals < 1406)])/400
+hist(all.residuals, breaks = 25, xlab = "Residuals", main = "")
+
+
+movie.lm <- lm(worldwidegross ~ ., data = train.t)
+summary(movie.lm)
+
+```
+```{r regression cluster}
+movie.lmC <- lm(worldwidegross ~ ., data = train.tC)
+summary(movie.lmC)
+
+#check for Variance Inflation Factor (VIF); must be < 10; should be less than 5
+vif(movie.lmC)
+# VIF for all variables is less than 5
+
+par(mfrow=c(2,2))
+plot(movie.lmC)
+options(scipen=999)
+hist(movie.lmC$residuals/100000000,
+     main="Histogram of Residuals",
+     xlab="Residuals") 
+```
+```{r predict cluster}
+summary(valid.tC$worldwidegross)
+
+# use predict() to make predictions on a new set. 
+lm.pred <- predict(movie.lmC, valid.tC)
+options(scipen=999, digits = 0)
+some.residuals <- valid.tC$worldwidegross[1:20] - lm.pred[1:20]
+data.frame("Predicted" = lm.pred[1:20], "Actual" = valid.tC$worldwidegross[1:20],
+           "Residual" = some.residuals)
+accuracy(lm.pred, valid.tC$worldwidegross)
+
+all.residuals <- valid.tC$worldwidegross - lm.pred
+length(all.residuals[which(all.residuals > -1406 & all.residuals < 1406)])/400
+hist(all.residuals, breaks = 25, xlab = "Residuals", main = "")
+```
+
+
+

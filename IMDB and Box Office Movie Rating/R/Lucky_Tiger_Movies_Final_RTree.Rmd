@@ -1,0 +1,280 @@
+---
+title: "Lucky_Tiger_Movies_R3_RTree"
+author: "Chan Khine"
+date: '2022-03-27'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r library, include=FALSE}
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(tidyverse) 
+library(tidymodels)
+library(ggplot2) 
+library(Rserve)
+library(mvoutlier)
+library(car)
+library(lmtest)
+library(sandwich)
+library(forecast)
+library(leaps)
+library(ggplot2)
+```
+
+Regression Tree
+1) genre1
+2) genre2
+3) bo_year_rank
+4) title
+5) studio
+6) worldwidegross
+7) domesticgross
+8) domesticpct
+9) overseasgross
+10) overseaspct
+11) studio
+12) primarytitle
+13) adult
+14) YearReleased
+15) runtimeMinutes
+16) genres
+17) director
+18) averageRating
+19) numVotes
+
+Target Variable - worldwide gross 
+Explanatory variables - runtimeMinutes, averageRating, bo_year_rank, numVotes,
+```{r preparation}
+
+df <- read.csv('/Users/mac/Desktop/4 DATA/Report/Final Project/clusterdata.csv')
+summary(df)
+str(df)
+df$numVotes_sq <- df$numVotes^2
+df$bo_and_num <- df$bo_year_rank * df$numVotes
+df$km.cluster <- as.character(df$km.cluster)
+df$Hcluster <- as.character(df$Hcluster)
+str(df)
+df2 <- filter(df, worldwidegross < 463000000, runtimeMinutes<190,numVotes<450000,
+              averageRating>2, bo_and_num<26000000, numVotes_sq<130000000000)
+# select variables for regression
+selected.varC <- c(3,6,7,8,9,10) 
+selected.var <- c(3,6,7,8)   
+# partition data
+set.seed(3)  # set seed for reproducing the partition
+set.seed(3)  # set seed for reproducing the partition
+train.index <- sample(c(1:dim(df2)[1]), dim(df2)[1]*0.6) 
+#Create and set aside the remaining 40% of the data, to be used after omitting unhelpful data points and unnecessary variables.
+train.dfC <- df2[ train.index, selected.varC ]
+valid.dfC <- df2[ -train.index, selected.varC ]
+train.df <- df2[ train.index, selected.var ]
+valid.df <- df2[ -train.index, selected.var ]
+```
+```{r regression tree}
+# regression tree
+# note the maxdepth parameter
+# anova = regression
+
+default.rt <- rpart(worldwidegross ~ ., data = train.df, method = "anova", 
+                    control = rpart.control(maxdepth = 3))
+# plot tree
+options(scipen=999)
+prp(default.rt, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10,digits=-3) # digits=-3 converts scientific notation
+
+```
+```{r default summary}
+summary(default.rt)
+```
+
+```{r complexity}
+#instead of controlling by depth, control by cp (cost of complexity penalty)
+deeper.rt <- rpart(worldwidegross ~ ., data = train.df, method = "anova", 
+                   cp = 0, minsplit = 20) #no penalty for complexity cp=0
+# count number of leaves
+length(deeper.rt$frame$var[deeper.rt$frame$var == "<leaf>"]) 
+
+# plot tree
+prp(deeper.rt, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10,
+    digits=-3,box.col=ifelse(deeper.rt$frame$var == "<leaf>", 'gray', 'white'))  
+
+
+```
+```{r Prediction}
+default.rt.point.pred.train <- predict(default.rt,train.df)%>%bind_cols(train.df)
+names(default.rt.point.pred.train)[1]<-paste("pred_train")
+rmse(default.rt.point.pred.train,
+                 estimate=pred_train,
+                 truth=worldwidegross)
+
+
+default.rt.point.pred.test <- predict(default.rt,valid.df)%>%bind_cols(valid.df)
+names(default.rt.point.pred.test)[1]<-paste("pred_test")
+rmse(default.rt.point.pred.test,
+                 estimate=pred_test,
+                 truth=worldwidegross)
+```
+```{r cv}
+movie_folds <- vfold_cv(train.df, v = 10)
+rt_spec <- decision_tree() %>%
+    set_mode("regression")%>%
+    set_engine("rpart")
+fits_cv_rsq <- fit_resamples(rt_spec,
+               worldwidegross~.,
+               resamples = movie_folds,
+               metrics = metric_set(yardstick::rsq))
+fits_cv_rmse <- fit_resamples(rt_spec,
+               worldwidegross~.,
+               resamples = movie_folds,
+               metrics = metric_set(yardstick::rmse))
+rsq_errors <- collect_metrics(fits_cv_rsq, summarize = FALSE)
+rmse_errors <-collect_metrics(fits_cv_rmse, summarize = FALSE)
+
+rsq=rsq_errors$.estimate
+
+rmse=rmse_errors$.estimate
+all_errors <- data.frame(rsq,rmse)
+
+ggplot(all_errors, aes(x=rsq,y=rmse)) +
+        geom_point()
+
+# Collect and print error statistics
+collect_metrics(fits_cv_rsq, summarize = TRUE)
+collect_metrics(fits_cv_rmse, summarize = TRUE)
+```
+```{r tuning hyperparameter}
+# Create a specification with tuning placeholders
+tune_spec <- decision_tree(tree_depth = tune(),
+                           cost_complexity = tune()) %>% 
+  # Specify mode
+  set_mode("regression") %>% 
+  # Specify engine
+  set_engine("rpart")
+# Create CV folds of the customers tibble
+folds <- vfold_cv(train.df, v = 10)
+
+tree_grid <- grid_regular(parameters(tune_spec),levels=10)
+
+# Tune along the grid
+tune_results <- tune_grid(tune_spec, 
+                          worldwidegross~ .,
+                          resamples = folds,
+                          grid = tree_grid,
+                          metrics = metric_set(yardstick::rmse))
+
+# Plot the tuning results
+autoplot(tune_results)
+final_params <- select_best(tune_results)
+best_spec <- finalize_model(tune_spec,final_params)
+best_spec
+```
+```{r best model}
+# retrain the tree to match the best parameters we found  
+trained_tree  <- rpart(worldwidegross ~ ., data = train.df, method = "anova", 
+                   cp = 0.0000000001, control = rpart.control(maxdepth = 4)) 
+
+   
+# print that best tree 
+options(scipen=999)
+prp(trained_tree, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10, 
+    digits=-3, box.col=ifelse(trained_tree$frame$var == "<leaf>", 'gray', 'white'))  
+```
+```{r Prediction Best Model}
+best.rt.pred.train <- predict(trained_tree,train.df)%>%bind_cols(train.df)
+names(best.rt.pred.train)[1]<-paste("pred_train")
+rmse(best.rt.pred.train,
+                 estimate=pred_train,
+                 truth=worldwidegross)
+rsq(best.rt.pred.train,
+                 estimate=pred_train,
+                 truth=worldwidegross)
+
+
+best.rt.pred.test <- predict(trained_tree,valid.df)%>%bind_cols(valid.df)
+names(best.rt.pred.test)[1]<-paste("pred_test")
+rmse(best.rt.pred.test,
+                 estimate=pred_test,
+                 truth=worldwidegross)
+rsq(best.rt.pred.test,
+                 estimate=pred_test,
+                 truth=worldwidegross)
+```
+
+```{r summary}
+summary(trained_tree)
+tree_grid
+final_params
+
+```
+```{r tuning hyperparameter}
+# Create a specification with tuning placeholders
+tune_spec <- decision_tree(tree_depth = tune(),
+                           cost_complexity = tune()) %>% 
+  # Specify mode
+  set_mode("regression") %>% 
+  # Specify engine
+  set_engine("rpart")
+# Create CV folds of the customers tibble
+folds <- vfold_cv(train.dfC, v = 10)
+
+tree_grid <- grid_regular(parameters(tune_spec),levels=10)
+
+# Tune along the grid
+tune_results <- tune_grid(tune_spec, 
+                          worldwidegross~ .,
+                          resamples = folds,
+                          grid = tree_grid,
+                          metrics = metric_set(yardstick::rmse))
+
+# Plot the tuning results
+autoplot(tune_results)
+final_params <- select_best(tune_results)
+best_spec <- finalize_model(tune_spec,final_params)
+best_spec
+```
+```{r best model}
+# retrain the tree to match the best parameters we found  
+trained_tree  <- rpart(worldwidegross ~ ., data = train.dfC, method = "anova", 
+                   cp = 0.0000000001, control = rpart.control(maxdepth = 5)) 
+
+   
+# print that best tree 
+options(scipen=999)
+prp(trained_tree, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10, 
+    digits=-3, box.col=ifelse(trained_tree$frame$var == "<leaf>", 'gray', 'white'))  
+```
+```{r Prediction Best Model}
+best.rt.pred.train <- predict(trained_tree,train.dfC)%>%bind_cols(train.dfC)
+names(best.rt.pred.train)[1]<-paste("pred_train")
+rmse(best.rt.pred.train,
+                 estimate=pred_train,
+                 truth=worldwidegross)
+rsq(best.rt.pred.train,
+                 estimate=pred_train,
+                 truth=worldwidegross)
+
+
+best.rt.pred.test <- predict(trained_tree,valid.dfC)%>%bind_cols(valid.dfC)
+names(best.rt.pred.test)[1]<-paste("pred_test")
+rmse(best.rt.pred.test,
+                 estimate=pred_test,
+                 truth=worldwidegross)
+rsq(best.rt.pred.test,
+                 estimate=pred_test,
+                 truth=worldwidegross)
+```
+
+```{r summary}
+summary(trained_tree)
+tree_grid
+final_params
+
+```
+
+
+
+
